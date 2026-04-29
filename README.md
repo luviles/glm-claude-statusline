@@ -3,7 +3,7 @@
 # GLM + Claude Code Statusline
 
 A rich, color-coded status line for [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-that displays real-time model info, context usage, and API quota — all in your terminal prompt.
+displays real-time model info, context usage, and GLM Coding Plan API quota — all in your terminal prompt.
 
 ![Statusline Preview](examples/glm-claude-statusline.png)
 
