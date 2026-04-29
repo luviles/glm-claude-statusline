@@ -41,6 +41,57 @@ that displays real-time model info, context usage, and API quota — all in your
 
 ## 🚀 Installation
 
+### Step 0 — Install `jq`
+
+<details>
+<summary>macOS</summary>
+
+```bash
+brew install jq
+```
+</details>
+
+<details>
+<summary>Ubuntu / Debian</summary>
+
+```bash
+sudo apt update && sudo apt install -y jq
+```
+</details>
+
+<details>
+<summary>Fedora / RHEL</summary>
+
+```bash
+sudo dnf install -y jq
+```
+</details>
+
+<details>
+<summary>Arch Linux</summary>
+
+```bash
+sudo pacman -S jq
+```
+</details>
+
+<details>
+<summary>Windows (WSL / Scoop / Chocolatey)</summary>
+
+```bash
+# WSL (Ubuntu)
+sudo apt update && sudo apt install -y jq
+
+# Scoop
+scoop install jq
+
+# Chocolatey
+choco install jq
+```
+</details>
+
+> Verify with `jq --version`.
+
 ### Step 1 — Download the script
 
 ```bash
