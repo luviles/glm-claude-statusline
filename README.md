@@ -33,10 +33,10 @@ displays real-time model info, context usage, and GLM Coding Plan API quota — 
 
 | Dependency | Purpose |
 |-----------|---------|
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | CLI that provides the statusline hook |
-| [`jq`](https://jstedfast.github.io/jq-manual/) | Lightweight JSON processor |
-| `curl` | Quota API requests |
-| `git` | Branch detection |
+| Claude Code CLI | CLI that provides the statusline hook |
+| jq | Lightweight JSON processor |
+| curl | Quota API requests |
+| git | Branch detection |
 
 
 ## 🚀 Installation
