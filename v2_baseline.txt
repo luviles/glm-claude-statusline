@@ -1,0 +1,331 @@
+#!/usr/bin/env bash
+
+# === Feature toggles ===
+SHOW_LOCATION=true
+SHOW_TIME=true
+SHOW_WEATHER=true
+SHOW_QUOTE=true
+SHOW_LIVE_QTA=true
+SHOW_WEEKLY_QTA=true
+
+# === Color palette (R;G;B) ===
+C_MODEL="125;162;247"         # #7DA2F7
+C_LOC="127;191;159"           # #7FBF9F
+C_CLOCK="155;138;251"         # #9B8AFB
+C_PWD="111;184;159"           # #6FB89F
+C_BRANCH="122;153;78"         # #7A994E
+C_SES="245;194;107"           # #F5C26B
+C_TIME="166;150;255"          # #A696FF
+C_COST="205;168;96"           # #CDA860
+C_QTA="240;138;90"            # #F08A5A
+C_LINK="130;170;255"          # #82AAFF
+C_STAR="245;194;107"          # #F5C26B
+C_QUOTE_TEXT="220;210;180"    # #DCD2B4
+C_AUTHOR="155;138;251"        # #9B8AFB
+
+DIVIDER="───────────────────────────────────────────────────────"
+
+# ── Utility ──────────────────────────────────────────────────
+
+file_age() {
+  [ -f "$1" ] || { echo 999999; return; }
+  echo $(( $(date +%s) - $(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0) ))
+}
+
+# #9DE2D0 → #F5C26B → #D95B5B (pos: 0–100)
+gradient_color() {
+  local pos=$1 r g b
+  if (( pos <= 50 )); then
+    r=$(( 157 + (245 - 157) * pos / 50 ))
+    g=$(( 226 + (194 - 226) * pos / 50 ))
+    b=$(( 208 + (107 - 208) * pos / 50 ))
+  else
+    local t=$(( pos - 50 ))
+    r=$(( 245 + (217 - 245) * t / 50 ))
+    g=$(( 194 + (91 - 194) * t / 50 ))
+    b=$(( 107 + (91 - 107) * t / 50 ))
+  fi
+  echo "${r};${g};${b}"
+}
+
+# -20°C(blue) … 40°C(red)
+temp_gradient_color() {
+  local temp=$1 r g b t
+  if   (( temp <= -20 )); then r=91  g=143 b=249
+  elif (( temp <=   0 )); then t=$(( (temp + 20) * 100 / 20 ))
+    r=$(( 91  + (110 - 91)  * t / 100 )); g=$(( 143 + (208 - 143) * t / 100 )); b=$(( 249 + (246 - 249) * t / 100 ))
+  elif (( temp <=  10 )); then t=$(( temp * 100 / 10 ))
+    r=$(( 110 + (152 - 110) * t / 100 )); g=$(( 208 + (226 - 208) * t / 100 )); b=$(( 246 + (198 - 246) * t / 100 ))
+  elif (( temp <=  20 )); then t=$(( (temp - 10) * 100 / 10 ))
+    r=$(( 152 + (245 - 152) * t / 100 )); g=$(( 226 + (194 - 226) * t / 100 )); b=$(( 198 + (107 - 198) * t / 100 ))
+  elif (( temp <=  30 )); then t=$(( (temp - 20) * 100 / 10 ))
+    r=$(( 245 + (240 - 245) * t / 100 )); g=$(( 194 + (138 - 194) * t / 100 )); b=$(( 107 + (93 - 107)  * t / 100 ))
+  elif (( temp <=  40 )); then t=$(( (temp - 30) * 100 / 10 ))
+    r=$(( 240 + (217 - 240) * t / 100 )); g=$(( 138 + (91 - 138)  * t / 100 )); b=$(( 93  + (91 - 93)   * t / 100 ))
+  else r=217 g=91 b=91; fi
+  echo "${r};${g};${b}"
+}
+
+# make_bar <pct:0-100> [width:20]
+make_bar() {
+  local pct=${1:-0} w=${2:-20}
+  local filled=$(( pct * w / 100 )) bar="" i bp color
+  for (( i=0; i<w; i++ )); do
+    bp=$(( i * 100 / (w - 1) ))
+    color=$(gradient_color "$bp")
+    (( i < filled )) \
+      && bar+="\033[38;2;${color}m▰\033[0m" \
+      || bar+="\033[2;37m▱\033[0m"
+  done
+  echo "$bar"
+}
+
+# ISO timestamp → "Today 3:00PM" / "Tomorrow 9:30AM" / "02/20"
+format_reset_time() {
+  [ -z "$1" ] || [ "$1" = "null" ] && return
+  python3 -c "
+from datetime import datetime, timedelta
+try:
+    dt = datetime.fromisoformat('$1').astimezone()
+    now = datetime.now().astimezone()
+    delta = (dt.date() - now.date()).days
+    if delta == 0: day = 'Today'
+    elif delta == 1: day = 'Tomorrow'
+    elif delta <= 7: day = dt.strftime('%a')
+    else: day = dt.strftime('%m/%d')
+    print(f'{day} {dt.strftime(\"%-I:%M%p\")}')
+except: pass
+" 2>/dev/null
+}
+
+# OSC 8 hyperlink wrapper
+mk_link() { echo "\033]8;;${1}\033\\\\${2}\033]8;;\033\\\\"; }
+
+# ── Parse JSON input (single jq call) ───────────────────────
+
+input=$(cat)
+{
+  read -r cwd
+  read -r used_pct
+  read -r model_name
+  read -r session_id
+  read -r total_cost_usd
+  read -r total_duration_ms
+} < <(echo "$input" | jq -r '
+  (.workspace.current_dir // .cwd // ""),
+  (.context_window.used_percentage // ""),
+  (.model.display_name // ""),
+  (.session_id // ""),
+  (.cost.total_cost_usd // ""),
+  (.cost.total_duration_ms // "")
+')
+
+short_cwd="${cwd/#$HOME/~}"
+
+# ── Data: Weather + Location (cache 30 min) ─────────────────
+
+weather_str="" location_str=""
+if [ "$SHOW_WEATHER" = true ] || [ "$SHOW_LOCATION" = true ]; then
+  w_cache="/tmp/.claude-weather-cache"
+  l_cache="/tmp/.claude-location-cache"
+
+  if (( $(file_age "$w_cache") < 1800 )) && [ -f "$l_cache" ]; then
+    weather_str=$(< "$w_cache")
+    location_str=$(< "$l_cache")
+  else
+    weather_raw=$(curl -s --max-time 2 "wttr.in/?format=%t" 2>/dev/null)
+    location_raw=$(curl -s --max-time 2 "wttr.in/?format=%l" 2>/dev/null)
+    [[ -n "$weather_raw" && ! "$weather_raw" =~ Unknown ]] \
+      && weather_str="$weather_raw" && echo "$weather_str" > "$w_cache"
+    if [[ -n "$location_raw" && ! "$location_raw" =~ Unknown ]]; then
+      location_str=$(echo "$location_raw" | sed 's/,[^,]*$//;s/^ *//')
+      echo "$location_str" > "$l_cache"
+    fi
+  fi
+fi
+
+# ── Data: Git branch ────────────────────────────────────────
+
+git_branch=""
+[ -n "$cwd" ] && git_branch=$(GIT_OPTIONAL_LOCKS=0 git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null || true)
+
+# ── Line 1: [Model] | LOC | time | weather ──────────────────
+
+temp_num=0
+[[ "$weather_str" =~ ([+-]?[0-9]+) ]] && temp_num="${BASH_REMATCH[1]}"
+
+line1="\033[38;2;${C_MODEL}m[${model_name:-N/A}]\033[0m"
+[ "$SHOW_LOCATION" = true ] && [ -n "$location_str" ] \
+  && line1+=" | \033[38;2;${C_LOC}mLOC: ${location_str}\033[0m"
+[ "$SHOW_TIME" = true ] \
+  && line1+=" | \033[38;2;${C_CLOCK}m$(date +%H:%M)\033[0m"
+[ "$SHOW_WEATHER" = true ] && [ -n "$weather_str" ] \
+  && line1+=" | \033[38;2;$(temp_gradient_color "$temp_num")m${weather_str}\033[0m"
+
+# ── Line 2: ◆ PWD | branch ──────────────────────────────────
+
+line2="\033[38;2;${C_PWD}m◆ PWD:\033[0m \033[38;2;${C_PWD}m${short_cwd}\033[0m"
+[ -n "$git_branch" ] && line2+=" | \033[38;2;${C_BRANCH}m${git_branch}\033[0m"
+
+# ── Line 3: ⚡︎SES: cost | time | context% ────────────────────
+
+cost_str="\$0.00"
+[ -n "$total_cost_usd" ] && [ "$total_cost_usd" != "null" ] \
+  && cost_str=$(awk "BEGIN{c=$total_cost_usd; if(c<0.01) printf \"<\$0.01\"; else printf \"\$%.2f\",c}")
+
+time_str="0s"
+if [ -n "$total_duration_ms" ] && [ "$total_duration_ms" != "null" ]; then
+  s=$(( ${total_duration_ms%.*} / 1000 ))
+  if   (( s < 60 ));   then time_str="${s}s"
+  elif (( s < 3600 )); then time_str="$(( s/60 ))m $(( s%60 ))s"
+  else                       time_str="$(( s/3600 ))h $(( s%3600/60 ))m"; fi
+fi
+
+used_int=0
+[ -n "$used_pct" ] && [ "$used_pct" != "null" ] && used_int=${used_pct%.*}
+[ -z "$used_int" ] && used_int=0
+
+line3="\033[38;2;${C_SES}m⚡︎SES:\033[0m"
+line3+=" \033[38;2;${C_COST}m${cost_str}\033[0m"
+line3+=" | \033[38;2;${C_TIME}m${time_str}\033[0m"
+line3+=" | $(make_bar "$used_int" 25) \033[38;2;$(gradient_color "$used_int")m${used_int}%\033[0m"
+
+# ── Line 4: ☁ QTA (Claude.ai 5-hour usage) ──────────────────
+
+usage_url="https://claude.ai/settings/usage"
+detail_link=$(mk_link "$usage_url" "\033[38;2;${C_LINK}m[↗]\033[0m")
+web_link=$(mk_link "$usage_url" "\033[38;2;${C_LINK}mCheck on the web ↗\033[0m")
+line4="" line4_weekly="" line4_guide=""
+
+sk_file="$HOME/.claude/claude-session-key"
+has_sk=false
+if [ "$SHOW_LIVE_QTA" = true ] && [ -f "$sk_file" ]; then
+  CLAUDE_SK=$(tr -d '\n' < "$sk_file")
+  [ -n "$CLAUDE_SK" ] && has_sk=true
+fi
+
+if [ "$has_sk" = true ]; then
+  limit_cache="/tmp/.claude-api-limit-cache"
+
+  if (( $(file_age "$limit_cache") >= 300 )); then
+    touch "$limit_cache"
+    (python3 -c "
+import urllib.request, json, platform, subprocess
+s = platform.system(); r = platform.release().replace('.', '_')
+if s == 'Darwin':
+    v = subprocess.run(['sw_vers', '-productVersion'], capture_output=True, text=True).stdout.strip().replace('.', '_')
+    ua = f'Mozilla/5.0 (Macintosh; Intel Mac OS X {v}) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{v.replace(\"_\", \".\")} Safari/605.1.15'
+elif s == 'Windows':
+    ua = f'Mozilla/5.0 (Windows NT {r}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+else:
+    ua = f'Mozilla/5.0 (X11; Linux {platform.machine()}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+sk = '$CLAUDE_SK'
+h = {'Cookie': f'sessionKey={sk}', 'Accept': 'application/json', 'User-Agent': ua}
+def fetch(url):
+    return json.loads(urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=10).read())
+try:
+    org = fetch('https://claude.ai/api/organizations')
+    org_uuid = org[0]['uuid']
+    # Try enterprise: get account_uuid via bootstrap, then overage_spend_limit
+    try:
+        bootstrap = fetch(f'https://claude.ai/api/bootstrap/{org_uuid}/app_start?statsig_hashing_algorithm=djb2&growthbook_format=sdk')
+        account_uuid = bootstrap['account']['uuid']
+        spend = fetch(f'https://claude.ai/api/organizations/{org_uuid}/overage_spend_limit?account_uuid={account_uuid}')
+        seat_tier = spend.get('seat_tier', '')
+        if 'enterprise' in seat_tier:
+            print(json.dumps({'type': 'enterprise', 'used_cents': spend.get('used_credits', 0), 'limit_cents': spend.get('monthly_credit_limit', 0)}))
+        else:
+            raise ValueError('not enterprise')
+    except:
+        # Fallback: Pro plan (5h + 7d)
+        usage = fetch(f'https://claude.ai/api/organizations/{org_uuid}/usage')
+        fh = usage.get('five_hour') or {}
+        sd = usage.get('seven_day') or {}
+        print(json.dumps({'type': 'pro', 'pct': int(fh.get('utilization', 0)), 'reset': fh.get('resets_at', ''), 'weekly_pct': int(sd.get('utilization', 0)), 'weekly_reset': sd.get('resets_at', '')}))
+except: print('{}')
+" > "$limit_cache" 2>/dev/null &)
+  fi
+
+  cache_type=""
+  [ -f "$limit_cache" ] && [ -s "$limit_cache" ] \
+    && cache_type=$(jq -r '.type // empty' "$limit_cache" 2>/dev/null)
+
+  if [ -z "$cache_type" ]; then
+    line4="\033[38;2;${C_QTA}m☁ QTA:\033[0m \033[2;37mloading...\033[0m ${detail_link}"
+  elif [ "$cache_type" = "enterprise" ]; then
+    used_cents=$(jq -r '.used_cents // 0' "$limit_cache" 2>/dev/null)
+    limit_cents=$(jq -r '.limit_cents // 0' "$limit_cache" 2>/dev/null)
+    ent_pct=0
+    [ "$limit_cents" -gt 0 ] 2>/dev/null && ent_pct=$(( used_cents * 100 / limit_cents ))
+    ent_pct_c=$(gradient_color "$ent_pct")
+    ent_pct_fmt=$(printf '%3d' "$ent_pct")
+    ent_used_str=$(awk "BEGIN{printf \"\$%.2f\", $used_cents/100}")
+    ent_limit_str=$(awk "BEGIN{printf \"\$%.2f\", $limit_cents/100}")
+    line4="\033[38;2;${C_QTA}m☁ QTA:\033[0m $(make_bar "$ent_pct") \033[38;2;${ent_pct_c}m${ent_used_str}/${ent_limit_str}  ${ent_pct_fmt}%\033[0m ${detail_link}"
+  else
+    fh_pct=$(jq -r '.pct // 0' "$limit_cache" 2>/dev/null)
+    fh_rest=""
+    fh_reset=$(jq -r '.reset // empty' "$limit_cache" 2>/dev/null)
+    fh_reset_str=$(format_reset_time "$fh_reset")
+    [ -n "$fh_reset_str" ] && fh_rest=" ↻ ${fh_reset_str}"
+    fh_pct_c=$(gradient_color "$fh_pct")
+    fh_pct_fmt=$(printf '%3d' "$fh_pct")
+
+    if [ "$SHOW_WEEKLY_QTA" = true ]; then
+      line4="\033[38;2;${C_QTA}m☁ QTA:\033[0m \033[2;37m5h\033[0m $(make_bar "$fh_pct") \033[38;2;${fh_pct_c}m${fh_pct_fmt}%${fh_rest}\033[0m"
+
+      dl_pct=$(jq -r '.weekly_pct // 0' "$limit_cache" 2>/dev/null)
+      dl_reset=$(jq -r '.weekly_reset // empty' "$limit_cache" 2>/dev/null)
+      dl_reset_str=$(format_reset_time "$dl_reset")
+      dl_rest=""
+      [ -n "$dl_reset_str" ] && dl_rest=" ↻ ${dl_reset_str}"
+      dl_pct_c=$(gradient_color "$dl_pct")
+      dl_pct_fmt=$(printf '%3d' "$dl_pct")
+      line4_weekly="\033[2;37m       7d\033[0m $(make_bar "$dl_pct") \033[38;2;${dl_pct_c}m${dl_pct_fmt}%${dl_rest}\033[0m ${detail_link}"
+    else
+      line4="\033[38;2;${C_QTA}m☁ QTA:\033[0m $(make_bar "$fh_pct") \033[38;2;${fh_pct_c}m${fh_pct_fmt}%${fh_rest}\033[0m ${detail_link}"
+    fi
+  fi
+else
+  line4="\033[38;2;${C_QTA}m☁ QTA:\033[0m ${web_link}"
+  [ "$SHOW_LIVE_QTA" = true ] \
+    && line4_guide="\033[2;37mLive QTA requires sessionKey in .claude/claude-session-key (from browser DevTools → Cookies → claude.ai)\033[0m"
+fi
+
+# ── Line 5: ✦ Quote (cache per session, refresh 15 min) ─────
+
+line5=""
+if [ "$SHOW_QUOTE" = true ]; then
+  quote_text="" quote_author=""
+
+  if [ -n "$session_id" ] && [ "$session_id" != "null" ]; then
+    qcache="/tmp/.claude-quote-${session_id}"
+
+    if (( $(file_age "$qcache") >= 900 )); then
+      [ -f "$qcache" ] && touch "$qcache"
+      (
+        raw=$(curl -s --connect-timeout 2 --max-time 3 "https://zenquotes.io/api/random" 2>/dev/null)
+        [ -n "$raw" ] && echo "$raw" | jq -e '.[0].q' >/dev/null 2>&1 && echo "$raw" > "$qcache"
+      ) &
+    fi
+
+    if [ -f "$qcache" ] && [ -s "$qcache" ]; then
+      quote_text=$(jq -r '.[0].q // empty' "$qcache" 2>/dev/null)
+      quote_author=$(jq -r '.[0].a // empty' "$qcache" 2>/dev/null)
+    fi
+  fi
+
+  if [ -n "$quote_text" ] && [ "$quote_text" != "null" ]; then
+    line5="\033[38;2;${C_STAR}m✦\033[0m \033[38;2;${C_QUOTE_TEXT}m\"${quote_text}\"\033[0m \033[38;2;${C_AUTHOR}m-${quote_author}\033[0m"
+  else
+    line5="\033[38;2;${C_STAR}m✦\033[0m \033[38;2;${C_QUOTE_TEXT}m\"Stay hungry, stay foolish.\"\033[0m \033[38;2;${C_AUTHOR}m-Steve Jobs\033[0m"
+  fi
+fi
+
+# ── Output ───────────────────────────────────────────────────
+
+output="$line1\n$DIVIDER\n$line2\n$DIVIDER\n$line3\n$DIVIDER\n$line4"
+[ -n "$line4_weekly" ] && output+="\n${line4_weekly}"
+[ -n "$line4_guide" ] && output+="\n${line4_guide}"
+[ -n "$line5" ] && output+="\n$DIVIDER\n$line5"
+printf '%b\n\n\n' "$output"
